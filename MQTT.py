@@ -1,10 +1,8 @@
 import time
 from bmp280 import BMP280
-from smbus2 import SMBus
 import paho.mqtt.client as mqtt
-import json
-
-import time
+import wiringpi as wiringpi
+import datetime
 from smbus2 import SMBus, i2c_msg
 
 # Create an I2C bus object
@@ -65,20 +63,47 @@ def get_value(bus, address):
     return (((bytes_read[0]&3)<<8) + bytes_read[1])/1.2  # conversion see datasheet
 
 
-PREDIFINED_TEMPS = [20.0, 25.0, 30.0]
-PREDIFINED_LUXES = [200.0, 400.0, 600.0]
+# Initialize WiringPi
+wiringpi.wiringPiSetup()
 
+# Set the pin mode
+temp_button_pin = 5
+lux_button_pin = 6
+wiringpi.pinMode(temp_button_pin, wiringpi.INPUT)
+wiringpi.pinMode(lux_button_pin, wiringpi.INPUT)
+                 
+# Define the target values
+temp_options = [20, 25, 30]
+lux_options = [50, 100, 200]
+
+# Initialize the current option indices
+
+target_temperature = 25
+target_lux = 100
+temp_counter = 0
+lux_counter = 0
+
+
+# LED control
+
+# Initialize the GPIO pin for the LED
+led_pin = 2  # Change this to the pin number you are using
+wiringpi.pinMode(led_pin, wiringpi.GPIO.PWM_OUTPUT)
+
+# Create a software PWM pin
+wiringpi.softPwmCreate(led_pin, 0, 100)  # Range from 0-100
+
+
+pwm_value = 50  # Change this to your desired initial brightness
+wiringpi.softPwmWrite(led_pin, pwm_value)
+
+# Temp control
+relay_pin = 3
+wiringpi.pinMode(relay_pin, 1)
+
+# Main loop
 
 while True:
-    # Measure temperature
-    bmp280_temperature = bmp280.get_temperature()
-
-    # Measure lux
-    bh1750_lux = get_value(bus, addressbh1750) 
-
-    # Prepare MQTT data as a query string
-    MQTT_DATA = "field1={}&field2={}".format(bmp280_temperature, bh1750_lux)
-    print(MQTT_DATA)
 
     try:
         # Check if the client is connected before publishing
@@ -92,7 +117,67 @@ while True:
         print("An error occurred. Attempting to reconnect.")
         client.reconnect()
 
+    print("-----------------")
+
+
+    # Check if the temperature button is pressed
+    if wiringpi.digitalRead(temp_button_pin) == wiringpi.LOW:
+        # Increment the counter and get the next target temperature
+        temp_counter = (temp_counter + 1) % len(temp_options)
+        target_temperature = temp_options[temp_counter]
+
+    # Check if the lux button is pressed
+    if wiringpi.digitalRead(lux_button_pin) == wiringpi.LOW:
+        # Increment the counter and get the next target lux
+        lux_counter = (lux_counter + 1) % len(lux_options)
+        target_lux = lux_options[lux_counter]
 
 
 
+    # Print date and time of measurement
+    print(datetime.datetime.now())
+
+    # Measure temperature
+    bmp280_temperature = bmp280.get_temperature()
+    print("Current temperature: {:.2f} C".format(bmp280_temperature))
+    print("Target temperature: {} C".format(target_temperature))
+
+    # Print the state of the lux button
+    temp_button_state = wiringpi.digitalRead(temp_button_pin)
+    print("Temp button state: {}".format("LOW" if temp_button_state == wiringpi.LOW else "HIGH"))
+    
+        # If temperature is below target, turn on relay to heat up
+    if bmp280_temperature < target_temperature:
+        wiringpi.digitalWrite(relay_pin, 1)  # Turn on relay
+    else:
+        wiringpi.digitalWrite(relay_pin, 0)  # Turn off relay
+
+    print()
+
+    # Measure lux
+    bh1750_lux = get_value(bus, addressbh1750)
+    print("Current light: {:.2f} Lux".format(bh1750_lux))
+    print("Target light: {} Lux".format(target_lux))
+
+     # Print the state of the lux button
+    lux_button_state = wiringpi.digitalRead(lux_button_pin)
+    print("Lux button state: {}".format("LOW" if lux_button_state == wiringpi.LOW else "HIGH"))
+
+        # Calculate the difference between the target and current lux
+    lux_difference = target_lux - bh1750_lux
+
+    # Adjust the PWM value based on the lux difference
+    if lux_difference > 0:
+        pwm_value = min(100, pwm_value + lux_difference)  # Increase brightness, but not more than 100
+    else:
+        pwm_value = max(0, pwm_value + lux_difference)  # Decrease brightness, but not less than 0
+
+    # Set the new PWM value
+    wiringpi.softPwmWrite(led_pin, int(pwm_value))
+
+    print("-----------------")
+
+    # Prepare MQTT data as a query string, also send target values to dashboard
+    MQTT_DATA = "field1={}&field2={}&field3={}&field4={}".format(bmp280_temperature, target_temperature, bh1750_lux, target_lux)
+    
 
